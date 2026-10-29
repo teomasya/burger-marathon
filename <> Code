@@ -1,0 +1,310 @@
+
+from flask import Flask, render_template_string
+
+app = Flask(__name__)
+
+PAGE = r"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Burger Runner</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;padding:14px;background:#171717;color:white;font-family:Arial;text-align:center}
+h1{margin:8px;font-size:clamp(26px,5vw,42px)}
+p{color:#bbb}
+.info{display:flex;justify-content:center;align-items:center;flex-wrap:wrap;gap:5px}
+.panel{background:#292929;border:1px solid #494949;border-radius:10px;padding:12px 15px;margin:5px}
+.game-wrap{max-width:950px;margin:14px auto}
+canvas{display:block;width:100%;height:auto;border:3px solid #777;border-radius:12px;touch-action:manipulation}
+button{border:0;border-radius:9px;padding:11px 16px;margin:5px;background:#ffbd38;color:#171717;font-weight:bold;font-size:15px;cursor:pointer}
+input[type=range]{width:100%;accent-color:#ffbd38}
+.controls{width:min(560px,96%);margin:10px auto}
+.control{margin:10px 0;text-align:left}
+.control label{display:flex;justify-content:space-between;gap:10px;font-weight:bold}
+.small{font-size:13px;line-height:1.6;color:#bbb}
+</style>
+</head>
+<body>
+<h1>🍔 Burger Runner</h1>
+<p>Burker maraton koşusu — hayatta kal abi!</p>
+
+<div class="info">
+  <div class="panel">Skor: <b id="score">0</b></div>
+  <div class="panel">Rekor: <b id="best">0</b></div>
+  <div class="panel">Hız: <b id="speedReadout">1.50×</b></div>
+</div>
+
+<div class="panel controls">
+  <div class="control">
+    <label for="speedControl">🏎️ Başlangıç hızı <span id="speedValue">1.50×</span></label>
+    <input id="speedControl" type="range" min="0.5" max="5" step="0.25" value="1.5">
+  </div>
+  <button id="autoButton">AUTO: OFF</button>
+  <div class="small">Auto accelerates from your selected starting speed.</div>
+  <div class="control">
+    <label for="spikeRate">🦷 Spike spawn rate <span id="spikeValue">1.0×</span></label>
+    <input id="spikeRate" type="range" min="0" max="3" step="0.1" value="1">
+    <div class="small">0 = no spikes · Higher = more frequent spikes</div>
+  </div>
+  <div class="control">
+    <label for="birdRate">🐦 Bird spawn rate <span id="birdValue">0.5×</span></label>
+    <input id="birdRate" type="range" min="0" max="3" step="0.1" value="0.5">
+    <div class="small">0 = no birds · Higher = more frequent birds</div>
+  </div>
+</div>
+
+<div class="game-wrap"><canvas id="game" width="900" height="440"></canvas></div>
+<button id="jumpButton">🍔 Zıpla abi!</button>
+<button id="restartButton">Yeniden başla</button>
+<p class="small">SPACE, ↑, Z or tap the game to jump. Double jump enabled!</p>
+
+<div class="info">
+  <div class="panel"><b>Abi şuan saat</b><br><span id="clock">--:--:--</span></div>
+  <div class="panel">
+    <b>Hava şuan nasıl?</b><br><span id="weatherText">Press to check weather.</span><br>
+    <button id="weatherButton">Hava durumunu bul</button>
+    <div class="small">Weather data: Open-Meteo</div>
+  </div>
+</div>
+
+<script>
+const canvas=document.getElementById("game"),ctx=canvas.getContext("2d");
+const W=canvas.width,H=canvas.height,groundY=365;
+const $=id=>document.getElementById(id);
+
+let score=0,elapsed=0,gameOver=false,lastTime=0,spawnTimer=2;
+let legTime=0,autoSpeed=false,autoElapsed=0;
+let speedMultiplier=1.5,obstacles=[];
+let best=0;
+try{best=Number(localStorage.getItem("burgerRunnerBest"))||0}catch(e){}
+$("best").textContent=best;
+
+const START_SPEED=145,GRAVITY=1250;
+const player={x:125,y:groundY-52,w:62,h:52,vy:0,jumps:0,onGround:true};
+
+const bubbles=Array.from({length:22},()=>({
+ x:Math.random()*W,y:Math.random()*H,r:2+Math.random()*4,drift:8+Math.random()*15
+}));
+
+function clamp(n,a,b){return Math.max(a,Math.min(b,n))}
+function rgb(n){return `rgb(${n},${n},${n})`}
+
+function theme(){
+ const phase=Math.floor(score/150)%2,within=score%150;
+ const fade=clamp((within-120)/30,0,1);
+ const bg=phase===0?Math.round(fade*255):Math.round(255-fade*255);
+ return{bg,tooth:255-bg};
+}
+
+function drawBackground(dt){
+ const t=theme();
+ ctx.fillStyle=rgb(t.bg);ctx.fillRect(0,0,W,H);
+ for(const b of bubbles){
+  b.y-=b.drift*dt;
+  if(b.y<-10){b.y=H+10;b.x=Math.random()*W}
+  ctx.beginPath();ctx.arc(b.x,b.y,b.r,0,Math.PI*2);
+  ctx.strokeStyle=t.bg<128?"rgba(255,255,255,.13)":"rgba(0,0,0,.12)";
+  ctx.stroke();
+ }
+ ctx.fillStyle=rgb(t.tooth);ctx.fillRect(0,groundY,W,3);
+}
+
+function drawBurger(){
+ const x=player.x,y=player.y;
+ ctx.save();
+ let a=0,b=0;
+ if(player.onGround&&!gameOver){a=Math.sin(legTime*12)*.5;b=Math.sin(legTime*12+Math.PI)*.5}
+ else{a=-.3;b=.3}
+ function leg(lx,angle){
+  ctx.save();ctx.translate(lx,y+37);ctx.rotate(angle);
+  ctx.strokeStyle="#633c20";ctx.lineWidth=5;ctx.lineCap="round";
+  ctx.beginPath();ctx.moveTo(0,0);ctx.lineTo(0,10);ctx.lineTo(7,11);ctx.stroke();ctx.restore();
+ }
+ leg(x+19,a);leg(x+43,b);
+
+ ctx.fillStyle="#d88a35";ctx.beginPath();ctx.ellipse(x+31,y+32,30,12,0,0,Math.PI);ctx.fill();
+ ctx.fillStyle="#63351f";ctx.fillRect(x+3,y+23,56,8);
+ ctx.fillStyle="#ffdb38";ctx.beginPath();
+ ctx.moveTo(x+5,y+21);ctx.lineTo(x+57,y+21);ctx.lineTo(x+51,y+28);
+ ctx.lineTo(x+42,y+23);ctx.lineTo(x+31,y+29);ctx.lineTo(x+20,y+23);
+ ctx.lineTo(x+10,y+28);ctx.closePath();ctx.fill();
+ ctx.fillStyle="#46b94d";ctx.beginPath();
+ ctx.moveTo(x+2,y+20);ctx.lineTo(x+10,y+17);ctx.lineTo(x+18,y+21);
+ ctx.lineTo(x+27,y+17);ctx.lineTo(x+37,y+21);ctx.lineTo(x+47,y+17);
+ ctx.lineTo(x+60,y+20);ctx.lineTo(x+57,y+24);ctx.lineTo(x+5,y+24);ctx.closePath();ctx.fill();
+ ctx.fillStyle="#f2b65e";ctx.beginPath();ctx.ellipse(x+31,y+17,30,17,0,Math.PI,Math.PI*2);
+ ctx.lineTo(x+61,y+20);ctx.quadraticCurveTo(x+31,y+27,x+1,y+20);ctx.closePath();ctx.fill();
+ ctx.strokeStyle="#fff0c4";ctx.lineWidth=2.5;
+ [[18,10],[29,5],[40,9],[48,13]].forEach(([sx,sy])=>{ctx.beginPath();ctx.moveTo(x+sx-2,y+sy);ctx.lineTo(x+sx+2,y+sy+1);ctx.stroke()});
+ ctx.fillStyle="#352216";ctx.beginPath();ctx.arc(x+38,y+17,2,0,Math.PI*2);ctx.arc(x+48,y+17,2,0,Math.PI*2);ctx.fill();
+ ctx.strokeStyle="#352216";ctx.lineWidth=1.5;ctx.beginPath();ctx.arc(x+43,y+20,4,.2,Math.PI-.2);ctx.stroke();
+ ctx.restore();
+}
+
+function drawObstacle(o){
+ const t=theme();
+ if(o.type==="bird"){
+  const wing=Math.sin(o.wave*10)*10;
+  ctx.save();ctx.translate(o.x,o.y);
+  ctx.fillStyle="#e99a28";
+  ctx.beginPath();ctx.ellipse(18,15,15,10,0,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.arc(30,9,8,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle="#ffdc42";ctx.beginPath();ctx.moveTo(36,8);ctx.lineTo(45,11);ctx.lineTo(36,14);ctx.fill();
+  ctx.fillStyle="#bd671a";ctx.beginPath();ctx.moveTo(17,14);
+  ctx.quadraticCurveTo(9,5-wing,2,1-wing);ctx.quadraticCurveTo(7,17,17,19);ctx.fill();
+  ctx.fillStyle="#222";ctx.beginPath();ctx.arc(32,7,1.8,0,Math.PI*2);ctx.fill();
+  ctx.restore();return;
+ }
+ ctx.fillStyle=rgb(t.tooth);ctx.beginPath();
+ ctx.moveTo(o.x,groundY);ctx.lineTo(o.x+o.w/2,groundY-o.h);
+ ctx.lineTo(o.x+o.w,groundY);ctx.closePath();ctx.fill();
+}
+
+function spawnObstacle(){
+ const spike=Number($("spikeRate").value);
+ const bird=Number($("birdRate").value);
+ const total=spike+bird;
+ if(total<=0)return;
+ if(Math.random()*total<bird){
+  obstacles.push({type:"bird",x:W+20,y:groundY-145,baseY:groundY-145,w:45,h:28,wave:0,phase:Math.random()*6});
+ }else{
+  obstacles.push({type:"spike",x:W+20,w:30,h:30+Math.random()*7});
+ }
+}
+
+function jump(){
+ if(gameOver){resetGame();return}
+ if(player.jumps<2){player.vy=player.jumps===0?-475:-430;player.jumps++;player.onGround=false}
+}
+
+function resetGame(){
+ score=0;elapsed=0;spawnTimer=2;obstacles=[];gameOver=false;legTime=0;autoElapsed=0;
+ speedMultiplier=Number($("speedControl").value);
+ player.y=groundY-player.h;player.vy=0;player.jumps=0;player.onGround=true;
+ lastTime=performance.now();
+}
+
+function update(dt){
+ if(gameOver)return;
+ elapsed+=dt;score+=dt*3;$("score").textContent=Math.floor(score);
+ if(autoSpeed){
+  autoElapsed+=dt;
+  speedMultiplier+=dt*(.08+autoElapsed*.003);
+  $("speedValue").textContent=speedMultiplier.toFixed(2)+"×";
+ }
+ // Safety limit keeps physics and rendering stable.
+ const speed=Math.min(1200,START_SPEED*speedMultiplier/1.5);
+ $("speedReadout").textContent=speedMultiplier.toFixed(2)+"×";
+
+ if(player.onGround)legTime+=dt;
+ player.vy+=GRAVITY*dt;player.y+=player.vy*dt;
+ if(player.y>=groundY-player.h){
+  player.y=groundY-player.h;player.vy=0;player.jumps=0;player.onGround=true;
+ }else player.onGround=false;
+
+ // Spawn rate controls independently affect spike and bird proportions
+ // and total obstacle frequency.
+ const spikeRate=Number($("spikeRate").value);
+ const birdRate=Number($("birdRate").value);
+ const total=spikeRate+birdRate;
+ spawnTimer-=dt;
+ if(spawnTimer<=0){
+  if(total>0)spawnObstacle();
+  spawnTimer=total===0?0.25:Math.max(.45,(3.5+Math.random()*1.5)/total);
+ }
+
+ for(const o of obstacles){
+  o.x-=speed*dt;
+  if(o.type==="bird"){
+   o.wave+=dt*5;
+   o.y=o.baseY+Math.sin(o.wave*1.5+o.phase)*45;
+  }
+ }
+ obstacles=obstacles.filter(o=>o.x+o.w>-20);
+
+ const px1=player.x+10,px2=player.x+player.w-8,py1=player.y+7,py2=player.y+player.h-3;
+ for(const o of obstacles){
+  const ox1=o.x+5,ox2=o.x+o.w-5;
+  const oy1=o.type==="spike"?groundY-o.h:o.y;
+  const oy2=o.type==="spike"?groundY:o.y+o.h;
+  if(px1<ox2&&px2>ox1&&py1<oy2&&py2>oy1){
+   gameOver=true;
+   const s=Math.floor(score);
+   if(s>best){best=s;$("best").textContent=best;try{localStorage.setItem("burgerRunnerBest",best)}catch(e){}}
+   break;
+  }
+ }
+}
+
+function drawOverlay(){
+ if(!gameOver)return;
+ const t=theme();
+ ctx.fillStyle=t.bg<128?"rgba(0,0,0,.68)":"rgba(255,255,255,.8)";
+ ctx.fillRect(0,0,W,H);ctx.textAlign="center";
+ ctx.fillStyle=t.bg<128?"#fff":"#000";
+ ctx.font="bold 40px Arial";ctx.fillText("Oyun bitti abi! 🍔",W/2,175);
+ ctx.font="bold 24px Arial";ctx.fillText("Skor: "+Math.floor(score),W/2,220);
+ ctx.font="20px Arial";ctx.fillText("Zıpla veya yeniden başla!",W/2,265);
+}
+
+function draw(dt){drawBackground(dt);obstacles.forEach(drawObstacle);drawBurger();drawOverlay()}
+function loop(time){
+ if(!lastTime)lastTime=time;
+ const dt=Math.min((time-lastTime)/1000,.035);lastTime=time;
+ update(dt);draw(dt);requestAnimationFrame(loop);
+}
+
+$("speedControl").addEventListener("input",()=>{
+ if(!autoSpeed)speedMultiplier=Number($("speedControl").value);
+ $("speedValue").textContent=Number($("speedControl").value).toFixed(2)+"×";
+});
+$("autoButton").addEventListener("click",()=>{
+ autoSpeed=!autoSpeed;autoElapsed=0;
+ $("autoButton").textContent=autoSpeed?"AUTO: ON 🚀":"AUTO: OFF";
+ $("autoButton").style.background=autoSpeed?"#79e08a":"#ffbd38";
+ $("speedControl").disabled=autoSpeed;
+ if(!autoSpeed){speedMultiplier=Number($("speedControl").value);$("speedValue").textContent=speedMultiplier.toFixed(2)+"×"}
+});
+$("spikeRate").addEventListener("input",()=>{$("spikeValue").textContent=Number($("spikeRate").value).toFixed(1)+"×"});
+$("birdRate").addEventListener("input",()=>{$("birdValue").textContent=Number($("birdRate").value).toFixed(1)+"×"});
+
+document.addEventListener("keydown",e=>{
+ if(["Space","ArrowUp","KeyZ"].includes(e.code)){e.preventDefault();if(!e.repeat)jump()}
+});
+canvas.addEventListener("pointerdown",e=>{e.preventDefault();jump()});
+$("jumpButton").addEventListener("click",jump);
+$("restartButton").addEventListener("click",resetGame);
+
+function updateClock(){$("clock").textContent=new Date().toLocaleTimeString()}
+updateClock();setInterval(updateClock,1000);
+
+$("weatherButton").addEventListener("click",()=>{
+ const out=$("weatherText");
+ if(!navigator.geolocation){out.textContent="No location support.";return}
+ out.textContent="Finding weather...";
+ navigator.geolocation.getCurrentPosition(async p=>{
+  try{
+   const url=`https://api.open-meteo.com/v1/forecast?latitude=${p.coords.latitude}&longitude=${p.coords.longitude}&current=temperature_2m,weather_code&timezone=auto`;
+   const r=await fetch(url);if(!r.ok)throw Error();
+   const d=await r.json(),c=d.current.weather_code;
+   const names={0:"Clear ☀️",1:"Mostly clear 🌤️",2:"Partly cloudy ⛅",3:"Cloudy ☁️",45:"Foggy 🌫️",48:"Foggy 🌫️",51:"Drizzle 🌦️",53:"Drizzle 🌦️",55:"Heavy drizzle 🌧️",61:"Light rain 🌧️",63:"Rain 🌧️",65:"Heavy rain 🌧️",71:"Light snow 🌨️",73:"Snow ❄️",75:"Heavy snow ❄️",80:"Showers 🌧️",81:"Showers 🌧️",82:"Heavy showers ⛈️",95:"Thunderstorm ⛈️"};
+   out.textContent=(names[c]||"Weather")+" · "+Math.round(d.current.temperature_2m)+"°C";
+  }catch(e){out.textContent="Weather unavailable. Check internet."}
+ },()=>{out.textContent="Allow location permission for weather."});
+});
+
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
+"""
+
+@app.route("/")
+def home():
+    return render_template_string(PAGE)
+
+if __name__ == "__main__":
+    app.run(debug=True, use_reloader=False)
